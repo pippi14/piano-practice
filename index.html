@@ -143,6 +143,7 @@
     border-radius: 6px;
     overflow: hidden;
     cursor: pointer;
+    touch-action: none; /* 指でのドラッグシーク用(スクロールと競合させない) */
     background:
       repeating-linear-gradient(90deg,
         #FDFBF4 0px, #FDFBF4 27px,
@@ -537,12 +538,36 @@ function releaseWakeLock() {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && getCurrent().playing()) requestWakeLock();
 });
-document.getElementById('seekbar').addEventListener('click', e => {
-  const rect = e.currentTarget.getBoundingClientRect();
-  const ratio = (e.clientX - rect.left) / rect.width;
-  const d = getCurrent().dur();
-  if (d > 0) getCurrent().seek(ratio * d);
+/* ── シークバー:タップとドラッグの両対応 ── */
+const seekbar = document.getElementById('seekbar');
+let dragging = false;
+let dragRatio = 0;
+
+function ratioFromEvent(e) {
+  const rect = seekbar.getBoundingClientRect();
+  return Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+}
+seekbar.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  dragging = true;
+  seekbar.setPointerCapture(e.pointerId);
+  dragRatio = ratioFromEvent(e);
+  if (mode === 'file') fileCtl.seek(dragRatio * fileCtl.dur());
 });
+seekbar.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  dragRatio = ratioFromEvent(e);
+  /* ローカル音源は指に追従してシーク。YouTubeは負荷が高いので指を離した時に確定 */
+  if (mode === 'file') fileCtl.seek(dragRatio * fileCtl.dur());
+});
+function endDrag(e) {
+  if (!dragging) return;
+  dragging = false;
+  const d = getCurrent().dur();
+  if (d > 0) getCurrent().seek(dragRatio * d);
+}
+seekbar.addEventListener('pointerup', endDrag);
+seekbar.addEventListener('pointercancel', endDrag);
 
 /* ────────────────────────────────
    A–B ループ
@@ -614,12 +639,14 @@ function drawLoopRegion() {
 setInterval(() => {
   const c = getCurrent();
   const t = c.time(), d = c.dur();
-  document.getElementById('curTime').textContent = fmt(t);
+  document.getElementById('curTime').textContent = fmt(dragging && d > 0 ? dragRatio * d : t);
   document.getElementById('durTime').textContent = fmt(d);
-  document.getElementById('playhead').style.left = (d > 0 ? (t / d * 100) : 0) + '%';
+  const ratio = dragging ? dragRatio : (d > 0 ? t / d : 0);
+  document.getElementById('playhead').style.left = (ratio * 100) + '%';
   drawLoopRegion();
-  if (loopOn && loopA != null && loopB != null && loopB > loopA) {
-    if (t >= loopB || t < loopA - 1.5) c.seek(loopA);
+  /* ループ判定:ドラッグ中は判定しない。B地点を越えたらAへ戻る */
+  if (!dragging && loopOn && loopA != null && loopB != null && loopB > loopA) {
+    if (t >= loopB) c.seek(loopA);
   }
 }, 120);
 
