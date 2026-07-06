@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="反復練習">
+<meta name="theme-color" content="#F5F1E6">
+<title>反復練習 — ピアノ練習プレイヤー</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Old+Mincho:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  /* ── 音の世界のトークン:象牙・黒檀・フェルト赤・真鍮 ── */
+  :root {
+    --ivory:      #F5F1E6;
+    --ivory-deep: #EAE4D2;
+    --ebony:      #1B1814;
+    --ebony-soft: #3A352D;
+    --felt:       #A6252F;   /* ピアノの鍵盤下に張られた赤いフェルト */
+    --brass:      #9A7B36;   /* ペダルの真鍮 */
+    --line:       #C9C1AB;
+    --radius: 10px;
+    font-size: 16px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  button { touch-action: manipulation; } /* ダブルタップ拡大の誤発動を防ぐ */
+  body {
+    background: var(--ivory);
+    color: var(--ebony);
+    font-family: "Zen Kaku Gothic New", "Hiragino Kaku Gothic ProN", sans-serif;
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 28px 20px 80px; }
+
+  /* ── ヘッダ:赤いフェルトの一本線が署名 ── */
+  header { margin-bottom: 26px; }
+  header h1 {
+    font-family: "Zen Old Mincho", serif;
+    font-weight: 700;
+    font-size: 1.9rem;
+    letter-spacing: 0.06em;
+  }
+  header .felt-strip {
+    height: 6px;
+    background: var(--felt);
+    border-radius: 3px;
+    margin-top: 10px;
+    box-shadow: 0 1px 0 rgba(0,0,0,.15) inset;
+  }
+  header p { margin-top: 10px; font-size: .9rem; color: var(--ebony-soft); }
+
+  /* ── ソース切替タブ ── */
+  .tabs { display: flex; gap: 8px; margin-bottom: 18px; }
+  .tabs button {
+    flex: 1;
+    padding: 10px 0;
+    font-family: inherit;
+    font-size: .95rem;
+    font-weight: 700;
+    letter-spacing: .05em;
+    border: 1.5px solid var(--ebony);
+    background: transparent;
+    color: var(--ebony);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .tabs button[aria-selected="true"] { background: var(--ebony); color: var(--ivory); }
+  .tabs button:focus-visible { outline: 3px solid var(--brass); outline-offset: 2px; }
+
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* ── 入力列 ── */
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input[type="text"], input[type="file"] {
+    font-family: inherit;
+    font-size: .95rem;
+    padding: 9px 12px;
+    border: 1.5px solid var(--line);
+    border-radius: var(--radius);
+    background: #fff;
+    color: var(--ebony);
+  }
+  input[type="text"]:focus { outline: 2px solid var(--brass); border-color: var(--brass); }
+  #ytUrl { flex: 1; min-width: 220px; }
+
+  .btn {
+    font-family: inherit;
+    font-size: .9rem;
+    font-weight: 700;
+    padding: 9px 16px;
+    border: 1.5px solid var(--ebony);
+    border-radius: var(--radius);
+    background: var(--ebony);
+    color: var(--ivory);
+    cursor: pointer;
+    transition: opacity .15s;
+  }
+  .btn:hover { opacity: .85; }
+  .btn:focus-visible { outline: 3px solid var(--brass); outline-offset: 2px; }
+  .btn.ghost { background: transparent; color: var(--ebony); }
+  .btn.felt  { background: var(--felt); border-color: var(--felt); }
+  .btn.felt.off { background: transparent; color: var(--felt); }
+
+  /* ── プレイヤー領域 ── */
+  #ytMount { margin-top: 14px; }
+  #ytMount iframe, #ytPlayer {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border: 0;
+    border-radius: var(--radius);
+    background: var(--ebony);
+  }
+  #fileName { font-size: .85rem; color: var(--ebony-soft); margin-top: 8px; }
+
+  /* ── コントロール盤 ── */
+  .console {
+    margin-top: 22px;
+    background: #FFFDF6;
+    border: 1.5px solid var(--line);
+    border-radius: var(--radius);
+    padding: 18px 18px 22px;
+  }
+  .console h2 {
+    font-family: "Zen Old Mincho", serif;
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: .1em;
+    color: var(--ebony-soft);
+    margin-bottom: 12px;
+  }
+  .console section + section { margin-top: 20px; padding-top: 18px; border-top: 1px dashed var(--line); }
+
+  /* 鍵盤シークバー:白鍵の上を針が走り、A–B区間に赤フェルトが掛かる */
+  .keys {
+    position: relative;
+    height: 54px;
+    border: 1.5px solid var(--ebony);
+    border-radius: 6px;
+    overflow: hidden;
+    cursor: pointer;
+    background:
+      repeating-linear-gradient(90deg,
+        #FDFBF4 0px, #FDFBF4 27px,
+        #D8D2BF 27px, #D8D2BF 28px);
+  }
+  .keys .black-keys {
+    position: absolute; inset: 0 auto auto 0;
+    width: 100%; height: 58%;
+    background:
+      repeating-linear-gradient(90deg,
+        transparent 0px,  transparent 18px,
+        var(--ebony) 18px, var(--ebony) 36px,
+        transparent 36px, transparent 46px,
+        var(--ebony) 46px, var(--ebony) 64px,
+        transparent 64px, transparent 84px,
+        transparent 84px, transparent 102px,
+        var(--ebony) 102px, var(--ebony) 120px,
+        transparent 120px, transparent 130px,
+        var(--ebony) 130px, var(--ebony) 148px,
+        transparent 148px, transparent 158px,
+        var(--ebony) 158px, var(--ebony) 176px,
+        transparent 176px, transparent 196px);
+    pointer-events: none;
+    opacity: .92;
+  }
+  .keys .loop-region {
+    position: absolute; top: 0; bottom: 0;
+    background: rgba(166, 37, 47, .38);
+    border-left: 2px solid var(--felt);
+    border-right: 2px solid var(--felt);
+    pointer-events: none;
+    display: none;
+  }
+  .keys .playhead {
+    position: absolute; top: 0; bottom: 0; width: 2px;
+    background: var(--brass);
+    box-shadow: 0 0 0 1px rgba(154,123,54,.35);
+    pointer-events: none;
+  }
+  .time-readout {
+    display: flex; justify-content: space-between;
+    font-variant-numeric: tabular-nums;
+    font-size: .85rem; color: var(--ebony-soft);
+    margin-top: 6px;
+  }
+
+  /* 速度 */
+  .speed-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+  .speed-btns button {
+    font-family: inherit; font-size: .85rem; font-weight: 500;
+    padding: 7px 12px;
+    border: 1.5px solid var(--line);
+    border-radius: 999px;
+    background: #fff; color: var(--ebony);
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+  }
+  .speed-btns button.on {
+    background: var(--ebony); color: var(--ivory); border-color: var(--ebony);
+    font-weight: 700;
+  }
+  .speed-slider-row { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+  input[type="range"] { flex: 1; accent-color: var(--felt); }
+  .speed-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700; min-width: 64px; text-align: right;
+  }
+  .pitch-note { font-size: .8rem; color: var(--ebony-soft); margin-top: 6px; }
+
+  /* A-Bループ */
+  .ab-grid {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 8px 10px;
+    align-items: center;
+  }
+  .ab-grid .lbl {
+    font-family: "Zen Old Mincho", serif;
+    font-weight: 700; font-size: 1.05rem;
+    width: 2em; text-align: center;
+    color: var(--felt);
+  }
+  .ab-grid input[type="text"] { width: 100%; font-variant-numeric: tabular-nums; }
+  .ab-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  .hint { font-size: .8rem; color: var(--ebony-soft); margin-top: 12px; }
+  .hint kbd {
+    font-family: inherit; font-size: .78rem;
+    border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 4px; padding: 1px 6px; background: #fff;
+  }
+
+  .transport { display: flex; gap: 8px; margin-top: 16px; }
+  .msg { margin-top: 10px; font-size: .85rem; color: var(--felt); min-height: 1.4em; }
+
+  footer { margin-top: 40px; font-size: .78rem; color: var(--ebony-soft); }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+  /* ── タッチ端末(iPhone / iPad)向け調整 ── */
+  @media (pointer: coarse) {
+    .btn, .tabs button { min-height: 46px; }
+    .speed-btns button { min-height: 42px; padding: 8px 14px; font-size: .9rem; }
+    .keys { height: 72px; }
+    input[type="range"] { height: 44px; }
+    input[type="text"] { min-height: 44px; font-size: 16px; } /* 16px未満だとiOSが自動ズームするため */
+    .ab-grid input[type="text"] { font-size: 16px; }
+    .hint { display: none; } /* キーボードショートカット表記は非表示 */
+  }
+
+  @media (max-width: 520px) {
+    header h1 { font-size: 1.5rem; }
+    .ab-grid { grid-template-columns: auto 1fr; }
+    .ab-grid .set-btn { grid-column: 2; justify-self: start; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>反復練習</h1>
+    <div class="felt-strip" aria-hidden="true"></div>
+    <p>模範演奏をゆっくり、何度でも。音程はそのまま、速度とループ区間だけを変えて練習するためのプレイヤーです。</p>
+  </header>
+
+  <div class="tabs" role="tablist">
+    <button id="tabYt" role="tab" aria-selected="true"  onclick="switchTab('yt')">YouTubeで練習</button>
+    <button id="tabFile" role="tab" aria-selected="false" onclick="switchTab('file')">手持ちの音源で練習</button>
+  </div>
+
+  <!-- ── YouTube パネル ── -->
+  <div class="panel active" id="panelYt">
+    <div class="row">
+      <input type="text" id="ytUrl" placeholder="YouTubeのURLを貼り付け(例: https://www.youtube.com/watch?v=...)">
+      <button class="btn" onclick="loadYouTube()">読み込む</button>
+    </div>
+    <div id="ytMount"><div id="ytPlayer"></div></div>
+  </div>
+
+  <!-- ── ローカル音源 パネル ── -->
+  <div class="panel" id="panelFile">
+    <div class="row">
+      <input type="file" id="audioFile" accept="audio/*,video/*" onchange="loadLocalFile(this.files)">
+    </div>
+    <div id="fileName">自分で録音した演奏や、購入した音源ファイル(mp3 / m4a / wav など)を選んでください。</div>
+    <audio id="localAudio" style="display:none"></audio>
+  </div>
+
+  <!-- ── 共通コントロール盤 ── -->
+  <div class="console">
+
+    <section>
+      <h2>再生位置</h2>
+      <div class="keys" id="seekbar" title="クリックで移動">
+        <div class="black-keys"></div>
+        <div class="loop-region" id="loopRegion"></div>
+        <div class="playhead" id="playhead" style="left:0%"></div>
+      </div>
+      <div class="time-readout">
+        <span id="curTime">0:00.0</span>
+        <span id="durTime">0:00.0</span>
+      </div>
+      <div class="transport">
+        <button class="btn" id="playBtn" onclick="togglePlay()">再生 / 一時停止</button>
+        <button class="btn ghost" onclick="jumpToA()">A地点へ戻る</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>速度(音程は一定)</h2>
+      <div class="speed-btns" id="speedBtns"></div>
+      <div class="speed-slider-row">
+        <input type="range" id="speedSlider" min="0.25" max="2" step="0.05" value="1" oninput="setSpeed(parseFloat(this.value))">
+        <span class="speed-value" id="speedValue">1.00×</span>
+      </div>
+      <p class="pitch-note" id="pitchNote">遅くしても音の高さは変わりません。</p>
+    </section>
+
+    <section>
+      <h2>A–B ループ</h2>
+      <div class="ab-grid">
+        <span class="lbl">A</span>
+        <input type="text" id="inA" placeholder="例 0:45 または 1:23.5" onchange="applyLoopInputs()">
+        <button class="btn ghost set-btn" onclick="setA()">今の位置をAに</button>
+        <span class="lbl">B</span>
+        <input type="text" id="inB" placeholder="例 1:10" onchange="applyLoopInputs()">
+        <button class="btn ghost set-btn" onclick="setB()">今の位置をBに</button>
+      </div>
+      <div class="ab-actions">
+        <button class="btn felt off" id="loopBtn" onclick="toggleLoop()">ループ:OFF</button>
+        <button class="btn ghost" onclick="clearLoop()">区間をクリア</button>
+      </div>
+      <p class="hint">
+        キー操作:<kbd>Space</kbd> 再生/停止 <kbd>[</kbd> A地点セット <kbd>]</kbd> B地点セット <kbd>L</kbd> ループ切替 <kbd>←</kbd><kbd>→</kbd> 3秒移動
+      </p>
+      <p class="msg" id="msg"></p>
+    </section>
+
+  </div>
+
+  <footer>
+    YouTubeの音声はダウンロードせず、公式プレイヤーの埋め込みで再生しています。手持ち音源はこの端末内で再生されるだけで、どこにも送信されません。
+  </footer>
+</div>
+
+<script>
+/* ────────────────────────────────
+   状態
+──────────────────────────────── */
+let mode = 'yt';              // 'yt' | 'file'
+let ytPlayer = null;
+let ytReady = false;
+let loopA = null, loopB = null;
+let loopOn = false;
+let speed = 1.0;
+const audio = document.getElementById('localAudio');
+audio.preservesPitch = true;
+audio.mozPreservesPitch = true;
+audio.webkitPreservesPitch = true;
+
+/* ────────────────────────────────
+   ユーティリティ
+──────────────────────────────── */
+function fmt(t) {
+  if (t == null || isNaN(t)) return '0:00.0';
+  const m = Math.floor(t / 60);
+  const s = (t - m * 60).toFixed(1).padStart(4, '0');
+  return m + ':' + s;
+}
+function parseTime(str) {
+  if (!str) return null;
+  str = str.trim()
+    .replace(/\uFF1A/g, ':')  /* 全角コロン → 半角 */
+    .replace(/[\uFF10-\uFF19]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)); /* 全角数字 → 半角 */
+  if (str === '') return null;
+  const parts = str.split(':');
+  let sec = 0;
+  for (const p of parts) sec = sec * 60 + parseFloat(p);
+  return isNaN(sec) ? null : sec;
+}
+function setMsg(t) { document.getElementById('msg').textContent = t || ''; }
+
+/* 現在のモードのプレイヤーを抽象化 */
+function getCurrent() { return mode === 'yt' ? ytCtl : fileCtl; }
+
+const ytCtl = {
+  time:   () => (ytReady ? ytPlayer.getCurrentTime() : 0),
+  dur:    () => (ytReady ? (ytPlayer.getDuration() || 0) : 0),
+  seek:   t  => { if (ytReady) ytPlayer.seekTo(t, true); },
+  play:   () => { if (ytReady) ytPlayer.playVideo(); },
+  pause:  () => { if (ytReady) ytPlayer.pauseVideo(); },
+  playing:() => (ytReady && ytPlayer.getPlayerState() === 1),
+  rate:   r  => { if (ytReady) ytPlayer.setPlaybackRate(r); }
+};
+const fileCtl = {
+  time:   () => audio.currentTime,
+  dur:    () => (audio.duration || 0),
+  seek:   t  => { audio.currentTime = t; },
+  play:   () => audio.play(),
+  pause:  () => audio.pause(),
+  playing:() => !audio.paused,
+  rate:   r  => { audio.playbackRate = r; }
+};
+
+/* ────────────────────────────────
+   タブ切替
+──────────────────────────────── */
+function switchTab(m) {
+  mode = m;
+  document.getElementById('tabYt').setAttribute('aria-selected', m === 'yt');
+  document.getElementById('tabFile').setAttribute('aria-selected', m === 'file');
+  document.getElementById('panelYt').classList.toggle('active', m === 'yt');
+  document.getElementById('panelFile').classList.toggle('active', m === 'file');
+  buildSpeedButtons();
+  applySpeedToPlayer();
+  updatePitchNote();
+}
+function updatePitchNote() {
+  document.getElementById('pitchNote').textContent =
+    mode === 'yt'
+      ? '遅くしても音の高さは変わりません(YouTubeプレイヤーの仕様)。速度は0.25刻みが確実です。'
+      : '遅くしても音の高さは変わりません。スライダーで細かく調整できます。';
+}
+
+/* ────────────────────────────────
+   YouTube
+──────────────────────────────── */
+function extractVideoId(url) {
+  const m = url.match(/(?:youtu\.be\/|v=|\/shorts\/|\/embed\/|\/live\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : (url.match(/^[A-Za-z0-9_-]{11}$/) ? url : null);
+}
+let pendingVideoId = null;
+function loadYouTube() {
+  const id = extractVideoId(document.getElementById('ytUrl').value);
+  if (!id) { setMsg('URLからVideo IDを読み取れませんでした。'); return; }
+  setMsg('');
+  clearLoop();
+  if (ytPlayer && ytReady) {
+    ytPlayer.loadVideoById(id);
+  } else {
+    pendingVideoId = id;
+    if (!window.YT) {
+      const s = document.createElement('script');
+      s.src = 'https://www.youtube.com/iframe_api';
+      document.head.appendChild(s);
+    } else if (window.YT && window.YT.Player) {
+      createPlayer(id);
+    }
+  }
+}
+function onYouTubeIframeAPIReady() {
+  if (pendingVideoId) createPlayer(pendingVideoId);
+}
+function createPlayer(id) {
+  ytPlayer = new YT.Player('ytPlayer', {
+    videoId: id,
+    playerVars: { rel: 0, playsinline: 1 },
+    events: {
+      onReady: () => { ytReady = true; applySpeedToPlayer(); },
+      onError: e => setMsg('この動画は読み込めませんでした(埋め込み不可の動画の可能性があります)。コード: ' + e.data)
+    }
+  });
+}
+
+/* ────────────────────────────────
+   ローカル音源
+──────────────────────────────── */
+function loadLocalFile(files) {
+  if (!files || !files[0]) return;
+  const f = files[0];
+  audio.src = URL.createObjectURL(f);
+  audio.preservesPitch = true;
+  document.getElementById('fileName').textContent = '読み込み中: ' + f.name;
+  clearLoop();
+  switchTab('file');
+  applySpeedToPlayer();
+}
+
+/* ────────────────────────────────
+   速度
+──────────────────────────────── */
+const YT_RATES  = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
+const FILE_RATES = [0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.25, 1.5];
+function buildSpeedButtons() {
+  const rates = mode === 'yt' ? YT_RATES : FILE_RATES;
+  const box = document.getElementById('speedBtns');
+  box.innerHTML = '';
+  rates.forEach(r => {
+    const b = document.createElement('button');
+    b.textContent = r.toFixed(2).replace(/0$/, '') + '×';
+    b.onclick = () => setSpeed(r);
+    b.dataset.rate = r;
+    box.appendChild(b);
+  });
+  markSpeed();
+}
+function setSpeed(r) {
+  speed = r;
+  document.getElementById('speedSlider').value = r;
+  applySpeedToPlayer();
+  markSpeed();
+}
+function applySpeedToPlayer() {
+  document.getElementById('speedValue').textContent = speed.toFixed(2) + '×';
+  getCurrent().rate(speed);
+}
+function markSpeed() {
+  document.querySelectorAll('#speedBtns button').forEach(b => {
+    b.classList.toggle('on', Math.abs(parseFloat(b.dataset.rate) - speed) < 0.001);
+  });
+}
+
+/* ────────────────────────────────
+   再生・シーク
+──────────────────────────────── */
+function togglePlay() {
+  const c = getCurrent();
+  if (c.playing()) { c.pause(); releaseWakeLock(); }
+  else { c.play(); requestWakeLock(); }
+}
+
+/* 練習中はなるべく画面を消灯させない(iOS 16.4以降・対応ブラウザのみ) */
+let wakeLock = null;
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+  } catch (e) { /* 非対応・省電力モード時などは黙って無視 */ }
+}
+function releaseWakeLock() {
+  try { if (wakeLock) { wakeLock.release(); wakeLock = null; } } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && getCurrent().playing()) requestWakeLock();
+});
+document.getElementById('seekbar').addEventListener('click', e => {
+  const rect = e.currentTarget.getBoundingClientRect();
+  const ratio = (e.clientX - rect.left) / rect.width;
+  const d = getCurrent().dur();
+  if (d > 0) getCurrent().seek(ratio * d);
+});
+
+/* ────────────────────────────────
+   A–B ループ
+──────────────────────────────── */
+function setA() {
+  loopA = getCurrent().time();
+  document.getElementById('inA').value = fmt(loopA);
+  validateLoop();
+}
+function setB() {
+  loopB = getCurrent().time();
+  document.getElementById('inB').value = fmt(loopB);
+  if (loopA != null && loopB != null && !loopOn) toggleLoop(true);
+  validateLoop();
+}
+function applyLoopInputs() {
+  loopA = parseTime(document.getElementById('inA').value);
+  loopB = parseTime(document.getElementById('inB').value);
+  validateLoop();
+}
+function validateLoop() {
+  if (loopA != null && loopB != null && loopB <= loopA) {
+    setMsg('B地点はA地点より後にしてください。');
+  } else {
+    setMsg('');
+  }
+  drawLoopRegion();
+}
+function toggleLoop(forceOn) {
+  loopOn = (forceOn === true) ? true : !loopOn;
+  if (loopOn && (loopA == null || loopB == null)) {
+    loopOn = false;
+    setMsg('A地点とB地点を先に設定してください。');
+  }
+  const b = document.getElementById('loopBtn');
+  b.textContent = 'ループ:' + (loopOn ? 'ON' : 'OFF');
+  b.classList.toggle('off', !loopOn);
+  drawLoopRegion();
+}
+function clearLoop() {
+  loopA = loopB = null;
+  loopOn = false;
+  document.getElementById('inA').value = '';
+  document.getElementById('inB').value = '';
+  const b = document.getElementById('loopBtn');
+  b.textContent = 'ループ:OFF';
+  b.classList.add('off');
+  drawLoopRegion();
+  setMsg('');
+}
+function jumpToA() {
+  if (loopA != null) { getCurrent().seek(loopA); getCurrent().play(); }
+}
+function drawLoopRegion() {
+  const el = document.getElementById('loopRegion');
+  const d = getCurrent().dur();
+  if (loopA != null && loopB != null && loopB > loopA && d > 0) {
+    el.style.display = 'block';
+    el.style.left  = (loopA / d * 100) + '%';
+    el.style.width = ((loopB - loopA) / d * 100) + '%';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+/* ────────────────────────────────
+   監視ループ(表示更新+ループ判定)
+──────────────────────────────── */
+setInterval(() => {
+  const c = getCurrent();
+  const t = c.time(), d = c.dur();
+  document.getElementById('curTime').textContent = fmt(t);
+  document.getElementById('durTime').textContent = fmt(d);
+  document.getElementById('playhead').style.left = (d > 0 ? (t / d * 100) : 0) + '%';
+  drawLoopRegion();
+  if (loopOn && loopA != null && loopB != null && loopB > loopA) {
+    if (t >= loopB || t < loopA - 1.5) c.seek(loopA);
+  }
+}, 120);
+
+/* ────────────────────────────────
+   キーボードショートカット
+──────────────────────────────── */
+document.addEventListener('keydown', e => {
+  const tag = document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  switch (e.key) {
+    case ' ': e.preventDefault(); togglePlay(); break;
+    case '[': setA(); break;
+    case ']': setB(); break;
+    case 'l': case 'L': toggleLoop(); break;
+    case 'ArrowLeft':  getCurrent().seek(Math.max(0, getCurrent().time() - 3)); break;
+    case 'ArrowRight': getCurrent().seek(getCurrent().time() + 3); break;
+  }
+});
+
+/* 初期化 */
+buildSpeedButtons();
+updatePitchNote();
+</script>
+</body>
+</html>
