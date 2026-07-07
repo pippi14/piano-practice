@@ -144,6 +144,8 @@
     overflow: hidden;
     cursor: pointer;
     touch-action: none; /* 指でのドラッグシーク用(スクロールと競合させない) */
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
     background:
       repeating-linear-gradient(90deg,
         #FDFBF4 0px, #FDFBF4 27px,
@@ -210,6 +212,13 @@
   .speed-value {
     font-variant-numeric: tabular-nums;
     font-weight: 700; min-width: 64px; text-align: right;
+  }
+  .hq-row {
+    display: flex; gap: 10px; align-items: center;
+    margin-top: 14px; font-size: .9rem; cursor: pointer;
+  }
+  .hq-row input[type="checkbox"] {
+    width: 20px; height: 20px; accent-color: var(--felt);
   }
   .pitch-note { font-size: .8rem; color: var(--ebony-soft); margin-top: 6px; }
 
@@ -320,6 +329,11 @@
         <span class="speed-value" id="speedValue">1.00×</span>
       </div>
       <p class="pitch-note" id="pitchNote">遅くしても音の高さは変わりません。</p>
+      <label class="hq-row">
+        <input type="checkbox" id="hqToggle" checked onchange="onHqToggle()">
+        高音質エンジンを使う(手持ち音源のみ・速度変更時に変換処理が入ります)
+      </label>
+      <p class="pitch-note" id="hqStatus"></p>
     </section>
 
     <section>
@@ -345,7 +359,8 @@
   </div>
 
   <footer>
-    YouTubeの音声はダウンロードせず、公式プレイヤーの埋め込みで再生しています。手持ち音源はこの端末内で再生されるだけで、どこにも送信されません。
+    YouTubeの音声はダウンロードせず、公式プレイヤーの埋め込みで再生しています。手持ち音源はこの端末内で再生されるだけで、どこにも送信されません。<br>
+    バージョン: v4(高音質エンジン搭載)
   </footer>
 </div>
 
@@ -471,17 +486,194 @@ function createPlayer(id) {
 /* ────────────────────────────────
    ローカル音源
 ──────────────────────────────── */
+let origURL = null;      /* 元ファイルのURL */
 function loadLocalFile(files) {
   if (!files || !files[0]) return;
   const f = files[0];
-  audio.src = URL.createObjectURL(f);
+  if (origURL) URL.revokeObjectURL(origURL);
+  if (stretchedURL) { URL.revokeObjectURL(stretchedURL); stretchedURL = null; }
+  curStretch = null;
+  origBuffer = null;
+  origURL = URL.createObjectURL(f);
+  audio.src = origURL;
   audio.preservesPitch = true;
   document.getElementById('fileName').textContent = '読み込み中: ' + f.name;
   clearLoop();
   switchTab('file');
+  /* 高音質エンジン用に音声をデコード(バックグラウンドで実行) */
+  f.arrayBuffer().then(buf => {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx.decodeAudioData(buf);
+  }).then(b => {
+    origBuffer = b;
+    document.getElementById('fileName').textContent = f.name;
+    fileSetSpeed(speed);
+  }).catch(() => {
+    origBuffer = null;
+    document.getElementById('fileName').textContent =
+      f.name + '(この形式は高音質エンジン非対応のため、通常モードで再生します)';
+  });
   applySpeedToPlayer();
 }
 
+/* ────────────────────────────────
+   高音質タイムストレッチエンジン
+   (SoundTouch系のWSOLA方式。速度変更時に音源全体を
+    変換してから再生するため、伸ばした音の揺れが少ない)
+──────────────────────────────── */
+let audioCtx = null;
+let origBuffer = null;    /* デコード済みの元音源 */
+let stretchedURL = null;  /* 変換済みWAVのURL */
+let curStretch = null;    /* 現在のsrcに焼き込まれた速度(nullなら元音源のまま) */
+let procTimer = null;
+let procToken = 0;
+let stretchWorker = null;
+
+function hqOn() { return document.getElementById('hqToggle').checked; }
+function hqStatus(t) { document.getElementById('hqStatus').textContent = t || ''; }
+function onHqToggle() { if (mode === 'file') fileSetSpeed(speed); }
+
+function fileSetSpeed(r) {
+  if (!audio.src) return;
+  clearTimeout(procTimer);
+  const useHq = hqOn() && origBuffer && Math.abs(r - 1) > 0.005;
+  if (!useHq) {
+    if (curStretch != null) revertToOriginal();
+    audio.playbackRate = r;
+    hqStatus('');
+    return;
+  }
+  if (curStretch != null && Math.abs(curStretch - r) < 0.005) {
+    audio.playbackRate = 1;
+    return;
+  }
+  hqStatus('変換待ち…');
+  procTimer = setTimeout(() => startStretch(r), 400);
+}
+
+/* ループ地点を「元音源の時間」を介して新しい時間軸に変換する
+   (時間軸の係数f: 焼き込まれた速度。元の時間 = 表示時間 × f) */
+function convertLoops(oldF, newF) {
+  if (loopA != null) { loopA = loopA * oldF / newF; document.getElementById('inA').value = fmt(loopA); }
+  if (loopB != null) { loopB = loopB * oldF / newF; document.getElementById('inB').value = fmt(loopB); }
+}
+
+function revertToOriginal() {
+  const oldF = curStretch || 1;
+  const origPos = audio.currentTime * oldF;
+  const wasPlaying = !audio.paused;
+  convertLoops(oldF, 1);
+  curStretch = null;
+  audio.src = origURL;
+  audio.preservesPitch = true;
+  audio.addEventListener('loadedmetadata', function h() {
+    audio.removeEventListener('loadedmetadata', h);
+    audio.currentTime = origPos;
+    audio.playbackRate = speed;
+    if (wasPlaying) audio.play();
+  });
+}
+
+function getWorker() {
+  if (!stretchWorker) {
+    stretchWorker = new Worker(URL.createObjectURL(
+      new Blob([WORKER_SRC], { type: 'application/javascript' })));
+  }
+  return stretchWorker;
+}
+
+function startStretch(r) {
+  const token = ++procToken;
+  hqStatus('変換中… 0%');
+  const chans = [];
+  for (let c = 0; c < origBuffer.numberOfChannels && c < 2; c++) {
+    chans.push(origBuffer.getChannelData(c).slice()); /* 転送で消えるためコピー */
+  }
+  const w = getWorker();
+  w.onmessage = e => {
+    if (token !== procToken) return; /* その後さらに速度が変わっていたら破棄 */
+    if (e.data.progress != null) { hqStatus('変換中… ' + e.data.progress + '%'); return; }
+    const oldF = curStretch || 1;
+    const origPos = audio.currentTime * oldF;
+    const wasPlaying = !audio.paused;
+    if (stretchedURL) URL.revokeObjectURL(stretchedURL);
+    stretchedURL = URL.createObjectURL(new Blob([e.data.wav], { type: 'audio/wav' }));
+    convertLoops(oldF, r);
+    curStretch = r;
+    audio.src = stretchedURL;
+    audio.addEventListener('loadedmetadata', function h() {
+      audio.removeEventListener('loadedmetadata', h);
+      audio.playbackRate = 1;
+      audio.currentTime = origPos / r;
+      if (wasPlaying) audio.play();
+    });
+    hqStatus('高音質モード(' + r.toFixed(2) + '×)で再生中');
+  };
+  w.postMessage(
+    { channels: chans, sampleRate: origBuffer.sampleRate, tempo: r },
+    chans.map(c => c.buffer));
+}
+
+/* Web Worker本体(WSOLA処理とWAVエンコード) */
+const WORKER_SRC = [
+'self.onmessage = function(e){',
+'  var channels=e.data.channels, sr=e.data.sampleRate, tempo=e.data.tempo;',
+'  var n=channels[0].length, nCh=channels.length;',
+'  var seq=Math.round(sr*0.040), ov=Math.round(sr*0.008), seek=Math.round(sr*0.012);',
+'  var hs=seq-ov, ha=Math.max(1,Math.round(hs*tempo));',
+'  var outLen=Math.ceil(n/tempo)+seq*2;',
+'  var out=[], c, i;',
+'  for(c=0;c<nCh;c++) out.push(new Float32Array(outLen));',
+'  var outMono=new Float32Array(outLen);',
+'  var mono=new Float32Array(n);',
+'  for(c=0;c<nCh;c++){var ch=channels[c];for(i=0;i<n;i++)mono[i]+=ch[i]/nCh;}',
+'  var first=Math.min(seq,n);',
+'  for(c=0;c<nCh;c++) out[c].set(channels[c].subarray(0,first),0);',
+'  outMono.set(mono.subarray(0,first),0);',
+'  var outPos=hs, frame=1, end=first;',
+'  var totalFrames=Math.max(1,Math.floor((n-seq-seek)/ha));',
+'  while(true){',
+'    var nominal=frame*ha;',
+'    if(nominal+seq+seek>=n || outPos+seq>=outLen) break;',
+'    var bestD=0, bestScore=-1e30, d;',
+'    for(d=0;d<seek;d++){',
+'      var corr=0, norm=1e-9, p=nominal+d, j;',
+'      for(j=0;j<ov;j++){var x=mono[p+j], y=outMono[outPos+j]; corr+=x*y; norm+=x*x;}',
+'      var score=corr/Math.sqrt(norm);',
+'      if(score>bestScore){bestScore=score; bestD=d;}',
+'    }',
+'    var src=nominal+bestD;',
+'    for(c=0;c<nCh;c++){',
+'      var oc=out[c], ic=channels[c];',
+'      for(i=0;i<ov;i++){var w=i/ov; oc[outPos+i]=oc[outPos+i]*(1-w)+ic[src+i]*w;}',
+'      oc.set(ic.subarray(src+ov,src+seq),outPos+ov);',
+'    }',
+'    for(i=0;i<ov;i++){var w2=i/ov; outMono[outPos+i]=outMono[outPos+i]*(1-w2)+mono[src+i]*w2;}',
+'    outMono.set(mono.subarray(src+ov,src+seq),outPos+ov);',
+'    end=outPos+seq;',
+'    outPos+=hs; frame++;',
+'    if(frame%400===0) self.postMessage({progress:Math.min(99,Math.round(frame/totalFrames*100))});',
+'  }',
+'  var wav=encodeWav(out,end,sr);',
+'  self.postMessage({wav:wav},[wav]);',
+'};',
+'function encodeWav(chs,len,sr){',
+'  var nCh=chs.length;',
+'  var dataSize=len*nCh*2;',
+'  var buf=new ArrayBuffer(44+dataSize);',
+'  var v=new DataView(buf);',
+'  function ws(o,s){for(var i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));}',
+'  ws(0,"RIFF"); v.setUint32(4,36+dataSize,true); ws(8,"WAVE"); ws(12,"fmt ");',
+'  v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,nCh,true);',
+'  v.setUint32(24,sr,true); v.setUint32(28,sr*nCh*2,true);',
+'  v.setUint16(32,nCh*2,true); v.setUint16(34,16,true); ws(36,"data");',
+'  v.setUint32(40,dataSize,true);',
+'  var i16=new Int16Array(buf,44);',
+'  var o=0;',
+'  for(var i=0;i<len;i++){for(var c=0;c<nCh;c++){var s=chs[c][i]; s=s<-1?-1:(s>1?1:s); i16[o++]=(s*32767)|0;}}',
+'  return buf;',
+'}'
+].join('\n');
 /* ────────────────────────────────
    速度
 ──────────────────────────────── */
@@ -508,7 +700,8 @@ function setSpeed(r) {
 }
 function applySpeedToPlayer() {
   document.getElementById('speedValue').textContent = speed.toFixed(2) + '×';
-  getCurrent().rate(speed);
+  if (mode === 'file') fileSetSpeed(speed);
+  else ytCtl.rate(speed);
 }
 function markSpeed() {
   document.querySelectorAll('#speedBtns button').forEach(b => {
@@ -550,7 +743,7 @@ function ratioFromEvent(e) {
 seekbar.addEventListener('pointerdown', e => {
   e.preventDefault();
   dragging = true;
-  seekbar.setPointerCapture(e.pointerId);
+  try { seekbar.setPointerCapture(e.pointerId); } catch (err) {}
   dragRatio = ratioFromEvent(e);
   if (mode === 'file') fileCtl.seek(dragRatio * fileCtl.dur());
 });
@@ -568,6 +761,21 @@ function endDrag(e) {
 }
 seekbar.addEventListener('pointerup', endDrag);
 seekbar.addEventListener('pointercancel', endDrag);
+
+/* 保険:タッチイベントでも同じ操作を実装(古い環境や一部WebView向け) */
+seekbar.addEventListener('touchstart', e => {
+  e.preventDefault();
+  dragging = true;
+  dragRatio = ratioFromEvent(e.touches[0]);
+  if (mode === 'file') fileCtl.seek(dragRatio * fileCtl.dur());
+}, { passive: false });
+seekbar.addEventListener('touchmove', e => {
+  if (!dragging) return;
+  e.preventDefault();
+  dragRatio = ratioFromEvent(e.touches[0]);
+  if (mode === 'file') fileCtl.seek(dragRatio * fileCtl.dur());
+}, { passive: false });
+seekbar.addEventListener('touchend', e => { e.preventDefault(); endDrag(e); }, { passive: false });
 
 /* ────────────────────────────────
    A–B ループ
