@@ -362,7 +362,7 @@
 
   <footer>
     YouTubeの音声はダウンロードせず、公式プレイヤーの埋め込みで再生しています。手持ち音源はこの端末内で再生されるだけで、どこにも送信されません。<br>
-    バージョン: v5(専用アイコン対応)
+    バージョン: v6(安定性改善)
   </footer>
 </div>
 
@@ -489,32 +489,21 @@ function createPlayer(id) {
    ローカル音源
 ──────────────────────────────── */
 let origURL = null;      /* 元ファイルのURL */
+let origFile = null;     /* 元ファイル(変換のたびに読み直してメモリ常駐を避ける) */
 function loadLocalFile(files) {
   if (!files || !files[0]) return;
   const f = files[0];
   if (origURL) URL.revokeObjectURL(origURL);
   if (stretchedURL) { URL.revokeObjectURL(stretchedURL); stretchedURL = null; }
   curStretch = null;
-  origBuffer = null;
+  origFile = f;
+  hqCapable = true;
   origURL = URL.createObjectURL(f);
   audio.src = origURL;
   audio.preservesPitch = true;
-  document.getElementById('fileName').textContent = '読み込み中: ' + f.name;
+  document.getElementById('fileName').textContent = f.name;
   clearLoop();
   switchTab('file');
-  /* 高音質エンジン用に音声をデコード(バックグラウンドで実行) */
-  f.arrayBuffer().then(buf => {
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    return audioCtx.decodeAudioData(buf);
-  }).then(b => {
-    origBuffer = b;
-    document.getElementById('fileName').textContent = f.name;
-    fileSetSpeed(speed);
-  }).catch(() => {
-    origBuffer = null;
-    document.getElementById('fileName').textContent =
-      f.name + '(この形式は高音質エンジン非対応のため、通常モードで再生します)';
-  });
   applySpeedToPlayer();
 }
 
@@ -524,7 +513,7 @@ function loadLocalFile(files) {
     変換してから再生するため、伸ばした音の揺れが少ない)
 ──────────────────────────────── */
 let audioCtx = null;
-let origBuffer = null;    /* デコード済みの元音源 */
+let hqCapable = true;     /* この音源で高音質エンジンが使えるか */
 let stretchedURL = null;  /* 変換済みWAVのURL */
 let curStretch = null;    /* 現在のsrcに焼き込まれた速度(nullなら元音源のまま) */
 let procTimer = null;
@@ -538,11 +527,11 @@ function onHqToggle() { if (mode === 'file') fileSetSpeed(speed); }
 function fileSetSpeed(r) {
   if (!audio.src) return;
   clearTimeout(procTimer);
-  const useHq = hqOn() && origBuffer && Math.abs(r - 1) > 0.005;
+  const useHq = hqOn() && origFile && hqCapable && Math.abs(r - 1) > 0.005;
   if (!useHq) {
     if (curStretch != null) revertToOriginal();
     audio.playbackRate = r;
-    hqStatus('');
+    if (hqCapable) hqStatus('');
     return;
   }
   if (curStretch != null && Math.abs(curStretch - r) < 0.005) {
@@ -584,21 +573,59 @@ function getWorker() {
   return stretchWorker;
 }
 
-function startStretch(r) {
+async function startStretch(r) {
   const token = ++procToken;
-  hqStatus('変換中… 0%');
-  const chans = [];
-  for (let c = 0; c < origBuffer.numberOfChannels && c < 2; c++) {
-    chans.push(origBuffer.getChannelData(c).slice()); /* 転送で消えるためコピー */
+  hqStatus('音源を解析中…');
+  let buf;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const ab = await origFile.arrayBuffer();
+    buf = await audioCtx.decodeAudioData(ab);
+  } catch (e) {
+    hqCapable = false;
+    hqStatus('この形式は高音質エンジン非対応のため、通常モードで再生します');
+    audio.playbackRate = speed;
+    return;
   }
+  if (token !== procToken) return;
+
+  /* メモリ見積もり(MB)で安全策を選ぶ:超過しそうなら自動でモノラル化、
+     それでも無理な長さなら高音質エンジンを断念(アプリ落ち防止) */
+  const n = buf.length;
+  const outN = Math.ceil(n / r);
+  const estMB = ch => (4 * n * ch + 4 * outN * ch + 2 * outN * ch) / 1e6;
+  let nCh = Math.min(buf.numberOfChannels, 2);
+  let note = '';
+  if (nCh > 1 && estMB(nCh) > 380) { nCh = 1; note = '(メモリ節約のためモノラルで変換)'; }
+  if (estMB(nCh) > 380) {
+    hqCapable = false;
+    buf = null;
+    hqStatus('この曲は長すぎて高音質変換できないため、通常モードで再生します');
+    audio.playbackRate = speed;
+    return;
+  }
+
+  const chans = [];
+  if (nCh === 1 && buf.numberOfChannels > 1) {
+    const L = buf.getChannelData(0), R = buf.getChannelData(1);
+    const m = new Float32Array(n);
+    for (let i = 0; i < n; i++) m[i] = (L[i] + R[i]) * 0.5;
+    chans.push(m);
+  } else {
+    for (let c = 0; c < nCh; c++) chans.push(buf.getChannelData(c).slice());
+  }
+  const sr = buf.sampleRate;
+  buf = null; /* デコード結果は即解放してメモリを空ける */
+
+  hqStatus('変換中… 0%');
   const w = getWorker();
   w.onmessage = e => {
     if (token !== procToken) return; /* その後さらに速度が変わっていたら破棄 */
-    if (e.data.progress != null) { hqStatus('変換中… ' + e.data.progress + '%'); return; }
+    if (e.data.progress != null) { hqStatus('変換中… ' + e.data.progress + '%' + note); return; }
     const oldF = curStretch || 1;
     const origPos = audio.currentTime * oldF;
     const wasPlaying = !audio.paused;
-    if (stretchedURL) URL.revokeObjectURL(stretchedURL);
+    const prevURL = stretchedURL;
     stretchedURL = URL.createObjectURL(new Blob([e.data.wav], { type: 'audio/wav' }));
     convertLoops(oldF, r);
     curStretch = r;
@@ -608,15 +635,16 @@ function startStretch(r) {
       audio.playbackRate = 1;
       audio.currentTime = origPos / r;
       if (wasPlaying) audio.play();
+      if (prevURL) URL.revokeObjectURL(prevURL); /* 切替完了後に旧データを解放 */
     });
-    hqStatus('高音質モード(' + r.toFixed(2) + '×)で再生中');
+    hqStatus('高音質モード(' + r.toFixed(2) + '×)で再生中' + note);
   };
   w.postMessage(
-    { channels: chans, sampleRate: origBuffer.sampleRate, tempo: r },
+    { channels: chans, sampleRate: sr, tempo: r },
     chans.map(c => c.buffer));
 }
 
-/* Web Worker本体(WSOLA処理とWAVエンコード) */
+/* Web Worker本体(WSOLA処理とWAVエンコード・省メモリ版) */
 const WORKER_SRC = [
 'self.onmessage = function(e){',
 '  var channels=e.data.channels, sr=e.data.sampleRate, tempo=e.data.tempo;',
@@ -626,12 +654,9 @@ const WORKER_SRC = [
 '  var outLen=Math.ceil(n/tempo)+seq*2;',
 '  var out=[], c, i;',
 '  for(c=0;c<nCh;c++) out.push(new Float32Array(outLen));',
-'  var outMono=new Float32Array(outLen);',
-'  var mono=new Float32Array(n);',
-'  for(c=0;c<nCh;c++){var ch=channels[c];for(i=0;i<n;i++)mono[i]+=ch[i]/nCh;}',
+'  var ref=channels[0], o0=out[0];',   /* 解析は第1チャンネルで行う(中間配列を持たない) */
 '  var first=Math.min(seq,n);',
 '  for(c=0;c<nCh;c++) out[c].set(channels[c].subarray(0,first),0);',
-'  outMono.set(mono.subarray(0,first),0);',
 '  var outPos=hs, frame=1, end=first;',
 '  var totalFrames=Math.max(1,Math.floor((n-seq-seek)/ha));',
 '  while(true){',
@@ -640,7 +665,7 @@ const WORKER_SRC = [
 '    var bestD=0, bestScore=-1e30, d;',
 '    for(d=0;d<seek;d++){',
 '      var corr=0, norm=1e-9, p=nominal+d, j;',
-'      for(j=0;j<ov;j++){var x=mono[p+j], y=outMono[outPos+j]; corr+=x*y; norm+=x*x;}',
+'      for(j=0;j<ov;j++){var x=ref[p+j], y=o0[outPos+j]; corr+=x*y; norm+=x*x;}',
 '      var score=corr/Math.sqrt(norm);',
 '      if(score>bestScore){bestScore=score; bestD=d;}',
 '    }',
@@ -650,13 +675,13 @@ const WORKER_SRC = [
 '      for(i=0;i<ov;i++){var w=i/ov; oc[outPos+i]=oc[outPos+i]*(1-w)+ic[src+i]*w;}',
 '      oc.set(ic.subarray(src+ov,src+seq),outPos+ov);',
 '    }',
-'    for(i=0;i<ov;i++){var w2=i/ov; outMono[outPos+i]=outMono[outPos+i]*(1-w2)+mono[src+i]*w2;}',
-'    outMono.set(mono.subarray(src+ov,src+seq),outPos+ov);',
 '    end=outPos+seq;',
 '    outPos+=hs; frame++;',
 '    if(frame%400===0) self.postMessage({progress:Math.min(99,Math.round(frame/totalFrames*100))});',
 '  }',
+'  channels=null; ref=null;',   /* WAV作成前に入力を解放してピークメモリを下げる */
 '  var wav=encodeWav(out,end,sr);',
+'  out=null;',
 '  self.postMessage({wav:wav},[wav]);',
 '};',
 'function encodeWav(chs,len,sr){',
